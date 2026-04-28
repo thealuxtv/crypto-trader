@@ -1,6 +1,3 @@
-// hooks/useTrader.js
-// Liga ao backend via WebSocket e expõe o estado em tempo real
-
 import { useState, useEffect, useCallback } from 'react'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
@@ -14,7 +11,6 @@ export function useTrader() {
   const [connected,  setConnected]  = useState(false)
   const [lastUpdate, setLastUpdate] = useState(null)
 
-  // Carrega estado inicial via REST
   const loadInitial = useCallback(async () => {
     try {
       const [statusRes, tradesRes] = await Promise.all([
@@ -30,7 +26,6 @@ export function useTrader() {
     }
   }, [])
 
-  // Carrega velas para o gráfico
   const loadCandles = useCallback(async (symbol = 'BTC/USDT', timeframe = '1h') => {
     try {
       const res  = await fetch(`${API_URL}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=100`)
@@ -41,13 +36,11 @@ export function useTrader() {
     }
   }, [])
 
-  // Reset da wallet simulada
   const resetWallet = useCallback(async () => {
     await fetch(`${API_URL}/reset`, { method: 'POST' })
     await loadInitial()
   }, [loadInitial])
 
-  // WebSocket — recebe updates do trading loop em tempo real
   useEffect(() => {
     loadInitial()
     loadCandles()
@@ -66,36 +59,34 @@ export function useTrader() {
         const { data } = msg
         setLastUpdate(new Date())
 
-        // Atualiza status com dados do ciclo
         setStatus(prev => ({
           ...prev,
           wallet: {
             ...prev?.wallet,
-            position:     data.indicators?.position,
+            position:      data.indicators?.position,
             unrealizedPnL: data.unrealizedPnL,
           },
           lastCycle: {
-            timestamp:    data.timestamp,
-            price:        data.price,
-            action:       data.decision.action,
-            confidence:   data.decision.confidence,
-            score:        data.decision.score,
-            reasons:      data.decision.reasons,
+            timestamp:     data.timestamp,
+            price:         data.price,
+            action:        data.decision.action,
+            confidence:    data.decision.confidence,
+            score:         data.decision.score,
+            reasons:       data.decision.reasons,
             unrealizedPnL: data.unrealizedPnL,
           },
         }))
 
         setIndicators(data.indicators)
 
-        // Adiciona novo trade ao histórico se houve ordem
         if (data.trade) {
           setTrades(prev => [data.trade, ...prev].slice(0, 50))
         }
       }
     }
 
-    ws.onclose  = () => { setConnected(false); console.log('[WS] Desligado') }
-    ws.onerror  = (e)  => { console.error('[WS] Erro:', e); setConnected(false) }
+    ws.onclose  = () => { setConnected(false) }
+    ws.onerror  = ()  => { setConnected(false) }
 
     return () => ws.close()
   }, [loadInitial, loadCandles])
