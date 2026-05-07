@@ -32,7 +32,7 @@ export function analyzeSignals(indicators) {
   ) * volumeMultiplier
 
   const confidence = Math.min(Math.abs(score), 1)
-  const THRESHOLD  = 0.35
+  const THRESHOLD  = 0.02
   let action = 'HOLD'
   if (score >= THRESHOLD)  action = 'BUY'
   if (score <= -THRESHOLD) action = 'SELL'

@@ -1,7 +1,7 @@
 import cron from 'node-cron'
 import { fetchCandles, fetchTicker } from './marketData.js'
 import { computeIndicators }         from './indicators.js'
-import { analyzeSignals }            from '../strategies/aiStrategy.js'
+import { analyzeWithML } from '../strategies/mlStrategy.js'
 import { executeOrder, checkStopAndTarget, getUnrealizedPnL } from './paperTrading.js'
 import 'dotenv/config'
 
@@ -30,7 +30,7 @@ async function runCycle() {
     const price      = ticker.last
     const indicators = computeIndicators(candles)
     const stopTrade  = await checkStopAndTarget(price)
-    const decision   = analyzeSignals(indicators)
+    const decision = await analyzeWithML(indicators)
 
     console.log(`[Loop] Sinal: ${decision.action} (score: ${decision.score})`)
     decision.reasons.forEach(r => console.log(`       → ${r}`))

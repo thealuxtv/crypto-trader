@@ -28,7 +28,7 @@ export function useTrader() {
 
   const loadCandles = useCallback(async (symbol = 'BTC/USDT', timeframe = '1h') => {
     try {
-      const res  = await fetch(`${API_URL}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=100`)
+      const res  = await fetch(`${API_URL}/candles?symbol=${symbol}&timeframe=${timeframe}&limit=50`)
       const data = await res.json()
       setCandles(data.candles || [])
     } catch (err) {
@@ -59,11 +59,20 @@ export function useTrader() {
         const { data } = msg
         setLastUpdate(new Date())
 
+        // Atualiza velas a cada ciclo
+        setCandles(prev => {
+          if (!prev?.length) return prev
+          const last = { ...prev[prev.length - 1] }
+          last.close = data.price
+          if (data.price > last.high) last.high = data.price
+          if (data.price < last.low)  last.low  = data.price
+          return [...prev.slice(0, -1), last]
+        })
+
         setStatus(prev => ({
           ...prev,
           wallet: {
             ...prev?.wallet,
-            position:      data.indicators?.position,
             unrealizedPnL: data.unrealizedPnL,
           },
           lastCycle: {
@@ -81,6 +90,8 @@ export function useTrader() {
 
         if (data.trade) {
           setTrades(prev => [data.trade, ...prev].slice(0, 50))
+          // Recarrega estado completo quando há um trade
+          loadInitial()
         }
       }
     }
@@ -91,5 +102,15 @@ export function useTrader() {
     return () => ws.close()
   }, [loadInitial, loadCandles])
 
-  return { status, trades, indicators, candles, connected, lastUpdate, resetWallet, loadCandles }
+  return {
+    status,
+    trades,
+    indicators,
+    candles,
+    connected,
+    lastUpdate,
+    resetWallet,
+    loadCandles,
+    loadStatus: loadInitial,
+  }
 }

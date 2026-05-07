@@ -73,7 +73,7 @@ function TradeRow({ trade }) {
 
 export default function App() {
   const [page, setPage] = useState('live')
-  const { status, trades, indicators, candles, connected, lastUpdate, resetWallet } = useTrader()
+  const { status, trades, indicators, candles, connected, lastUpdate, resetWallet, loadStatus, loadCandles } = useTrader()
 
   const wallet    = status?.wallet
   const lastCycle = status?.lastCycle
@@ -166,7 +166,8 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
           {/* Gráfico de velas */}
-          <CandleChart candles={candles} indicators={ind} />
+          <CandleChart candles={candles} indicators={ind} onTimeframeChange={(tf) => loadCandles('BTC/USDT', tf)} />
+
 
           {/* Sinal da IA */}
           <div style={{ background: '#111120', border: '1px solid #1e1e2e', borderRadius: 12, padding: 18 }}>
@@ -284,25 +285,40 @@ export default function App() {
               )}
             </div>
 
-            {/* Posição aberta */}
-            {wallet?.position && (
-              <div style={{ background: '#0d2a1a', border: '1px solid #0d4a2a', borderRadius: 12, padding: 18 }}>
-                <h2 style={{ margin: '0 0 14px', fontSize: 13, color: '#22c97b', textTransform: 'uppercase', letterSpacing: 1 }}>Posição aberta</h2>
-                {[
-                  ['Par',         wallet.position.symbol],
-                  ['Entrada',     fmtK(wallet.position.entryPrice)],
-                  ['Quantidade',  fmt(wallet.position.quantity, 6)],
-                  ['Stop-loss',   fmtK(wallet.position.stopLoss)],
-                  ['Take-profit', fmtK(wallet.position.takeProfit)],
-                ].map(([k, v]) => (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, color: '#0d8a4a' }}>{k}</span>
-                    <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#22c97b' }}>{v}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
+          {/* Posição aberta */}
+          {wallet?.position && (
+            <div style={{ background: '#0d2a1a', border: '1px solid #0d4a2a', borderRadius: 12, padding: 18 }}>
+              <h2 style={{ margin: '0 0 14px', fontSize: 13, color: '#22c97b', textTransform: 'uppercase', letterSpacing: 1 }}>Posição aberta</h2>
+              {[
+                ['Par',         wallet.position.symbol],
+                ['Entrada',     fmtK(wallet.position.entryPrice)],
+                ['Quantidade',  fmt(wallet.position.quantity, 6)],
+                ['Stop-loss',   fmtK(wallet.position.stopLoss)],
+                ['Take-profit', fmtK(wallet.position.takeProfit)],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, color: '#0d8a4a' }}>{k}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#22c97b' }}>{v}</span>
+                </div>
+              ))}
+              <button
+                onClick={async () => {
+                  await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3001/api'}/close-position`, {
+                    method: 'POST'
+                  })
+                  await loadStatus()
+                }}
+                style={{
+                  width: '100%', marginTop: 12, padding: '9px 0',
+                  background: '#3d0d0d', border: '1px solid #6a1a1a',
+                  color: '#f05252', borderRadius: 8, fontSize: 13,
+                  fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                ✕ Fechar posição
+              </button>
+            </div>
+          )}
             {lastUpdate && (
               <p style={{ fontSize: 11, color: '#333', textAlign: 'center', margin: 0 }}>
                 Atualizado às {lastUpdate.toLocaleTimeString('pt-PT')}
