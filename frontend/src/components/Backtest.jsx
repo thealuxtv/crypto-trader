@@ -90,13 +90,27 @@ export default function Backtest() {
     setConfig(prev => ({ ...prev, [name]: value }))
   }, [])
 
-  const runBacktest = async () => {
+  const runBacktest = async (useML = false) => {
     setLoading(true); setError(null); setResult(null)
     try {
-      const res  = await fetch(`${API_URL}/backtest`, {
-        method: 'POST',
+      const endpoint = useML ? `${API_URL}/backtest/ml` : `${API_URL}/backtest`
+      const body = useML
+        ? {
+            symbol:           config.symbol,
+            timeframe:        config.timeframe,
+            limit:            config.limit,
+            starting_balance: config.startingBalance,
+            stop_loss_pct:    config.stopLossPct,
+            take_profit_pct:  config.takeProfitPct,
+            max_position_pct: config.maxPositionPct,
+            fees_pct:         config.feesPct,
+          }
+        : config
+
+      const res  = await fetch(endpoint, {
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
+        body:    JSON.stringify(body),
       })
       const data = await res.json()
       if (!data.ok) throw new Error(data.error)
@@ -152,16 +166,34 @@ export default function Backtest() {
           <SliderField label="Take-profit"    name="takeProfitPct"   value={config.takeProfitPct}   min={0.01} max={0.20} step={0.005}  format={v => `${(v*100).toFixed(1)}%`} onChange={handleChange} />
           <SliderField label="Tamanho posição" name="maxPositionPct" value={config.maxPositionPct}  min={0.05} max={0.50} step={0.05}   format={v => `${(v*100).toFixed(0)}%`} onChange={handleChange} />
 
-          <button onClick={runBacktest} disabled={loading} style={{
-            width: '100%', padding: '11px 0', marginTop: 4,
-            background: loading ? '#1a1a2a' : '#1a1a4a',
-            border: `1px solid ${loading ? '#333' : '#3333aa'}`,
-            color: loading ? '#555' : '#aaaaff',
-            borderRadius: 10, fontSize: 14, fontWeight: 600,
-            cursor: loading ? 'not-allowed' : 'pointer',
-          }}>
-            {loading ? '⏳ A correr...' : '▶ Correr backtest'}
+          <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <button
+            onClick={() => runBacktest(false)}
+            disabled={loading}
+            style={{
+              flex: 1, padding: '11px 0',
+              background: loading ? '#1a1a2a' : '#1a1a4a',
+              border: `1px solid ${loading ? '#333' : '#3333aa'}`,
+              color: loading ? '#555' : '#aaaaff',
+              borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading ? '⏳ A correr...' : '▶ Regras fixas'}
           </button>
+          <button
+            onClick={() => runBacktest(true)}
+            disabled={loading}
+            style={{
+              flex: 1, padding: '11px 0',
+              background: loading ? '#1a1a2a' : '#0d2a1a',
+              border: `1px solid ${loading ? '#333' : '#0d4a2a'}`,
+              color: loading ? '#555' : '#22c97b',
+              borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading ? '⏳ A correr...' : '🤖 Modelo ML'}
+          </button>
+        </div>
 
           {error && <p style={{ fontSize: 12, color: '#f05252', marginTop: 10, textAlign: 'center' }}>{error}</p>}
         </div>

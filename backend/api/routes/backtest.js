@@ -18,4 +18,20 @@ router.post('/', async (req, res) => {
   }
 })
 
+// POST /api/backtest/ml
+router.post('/ml', async (req, res) => {
+  try {
+    const ML_URL = process.env.ML_SERVICE_URL || 'http://localhost:8000'
+    const response = await fetch(`${ML_URL}/backtest`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(req.body),
+    })
+    const data = await response.json()
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
 export default router

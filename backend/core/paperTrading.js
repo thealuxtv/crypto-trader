@@ -1,3 +1,4 @@
+// core/paperTrading.js
 import 'dotenv/config'
 import { Trade, Wallet } from './models.js'
 
@@ -6,78 +7,104 @@ const STOP_LOSS_PCT    = parseFloat(process.env.STOP_LOSS_PCT    || '0.03')
 const TAKE_PROFIT_PCT  = parseFloat(process.env.TAKE_PROFIT_PCT  || '0.06')
 const MAX_POSITION_PCT = parseFloat(process.env.MAX_POSITION_PCT || '0.10')
 
-let state = { balanceUSDT: STARTING_BALANCE, position: null, totalPnL: 0 }
+// Estado em memória por utilizador
+const states = {}
 
-export async function loadState() {
+function defaultState() {
+  return { balanceUSDT: STARTING_BALANCE, position: null, totalPnL: 0 }
+}
+
+export async function loadState(userId = 'default') {
   try {
-    let wallet = await Wallet.findOne()
+    let wallet = await Wallet.findOne({ userId })
     if (!wallet) {
-      wallet = await Wallet.create({ balanceUSDT: STARTING_BALANCE })
-      console.log('[PaperTrading] Wallet criada no MongoDB')
+      wallet = await Wallet.create({ userId, balanceUSDT: STARTING_BALANCE })
+      console.log(`[PaperTrading] Wallet criada para ${userId}`)
     }
-    state.balanceUSDT = wallet.balanceUSDT
-    state.totalPnL    = wallet.totalPnL
-    state.position    = wallet.position?.symbol ? wallet.position : null
-    console.log(`[PaperTrading] Estado carregado — saldo: $${state.balanceUSDT.toFixed(2)}`)
+    states[userId] = {
+      balanceUSDT: wallet.balanceUSDT,
+      totalPnL:    wallet.totalPnL,
+      position:    wallet.position?.symbol ? wallet.position : null,
+    }
+    console.log(`[PaperTrading] Estado carregado para ${userId} — saldo: $${states[userId].balanceUSDT.toFixed(2)}`)
   } catch (err) {
     console.error('[PaperTrading] Erro ao carregar estado:', err.message)
+    states[userId] = defaultState()
   }
 }
 
-async function saveState() {
+async function saveState(userId) {
+  const s = states[userId]
+  if (!s) return
   await Wallet.findOneAndUpdate(
-    {},
-    { balanceUSDT: state.balanceUSDT, totalPnL: state.totalPnL, position: state.position, updatedAt: new Date() },
+    { userId },
+    { balanceUSDT: s.balanceUSDT, totalPnL: s.totalPnL, position: s.position, updatedAt: new Date() },
     { upsert: true, new: true }
   )
 }
 
-export function getState() { return { ...state } }
-
-export async function resetState() {
-  state = { balanceUSDT: STARTING_BALANCE, position: null, totalPnL: 0 }
-  await Wallet.findOneAndUpdate({}, { balanceUSDT: STARTING_BALANCE, totalPnL: 0, position: null }, { upsert: true })
-  await Trade.deleteMany({})
+export function getState(userId = 'default') {
+  return { ...(states[userId] || defaultState()) }
 }
 
-export async function executeOrder(action, symbol, currentPrice, reason = '') {
+export async function resetState(userId = 'default') {
+  states[userId] = defaultState()
+  await Wallet.findOneAndUpdate(
+    { userId },
+    { balanceUSDT: STARTING_BALANCE, totalPnL: 0, position: null },
+    { upsert: true }
+  )
+  await Trade.deleteMany({ userId })
+  console.log(`[PaperTrading] Estado reiniciado para ${userId}`)
+}
+
+export async function executeOrder(action, symbol, currentPrice, reason = '', userId = 'default') {
+  if (!states[userId]) states[userId] = defaultState()
+  const s = states[userId]
+
   if (action === 'BUY') {
-    if (state.position) return null
-    const amountToSpend = state.balanceUSDT * MAX_POSITION_PCT
+    if (s.position) return null
+    const amountToSpend = s.balanceUSDT * MAX_POSITION_PCT
     const quantity      = amountToSpend / currentPrice
     const stopLoss      = currentPrice * (1 - STOP_LOSS_PCT)
     const takeProfit    = currentPrice * (1 + TAKE_PROFIT_PCT)
-    state.position     = { symbol, quantity, entryPrice: currentPrice, stopLoss, takeProfit }
-    state.balanceUSDT -= amountToSpend
-    const trade = await Trade.create({ type: 'BUY', symbol, price: currentPrice, quantity, value: amountToSpend, stopLoss, takeProfit, reason })
-    await saveState()
+    s.position     = { symbol, quantity, entryPrice: currentPrice, stopLoss, takeProfit }
+    s.balanceUSDT -= amountToSpend
+    const trade = await Trade.create({ userId, type: 'BUY', symbol, price: currentPrice, quantity, value: amountToSpend, stopLoss, takeProfit, reason })
+    await saveState(userId)
+    console.log(`[PaperTrading] BUY ${quantity.toFixed(6)} ${symbol} @ $${currentPrice.toFixed(2)} [${userId}]`)
     return trade
   }
+
   if (action === 'SELL') {
-    if (!state.position) return null
-    const { quantity, entryPrice } = state.position
+    if (!s.position) return null
+    const { quantity, entryPrice } = s.position
     const saleValue = quantity * currentPrice
     const pnl       = saleValue - (quantity * entryPrice)
     const pnlPct    = ((currentPrice - entryPrice) / entryPrice) * 100
-    state.balanceUSDT += saleValue
-    state.totalPnL    += pnl
-    state.position     = null
-    const trade = await Trade.create({ type: 'SELL', symbol, price: currentPrice, quantity, value: saleValue, pnl: parseFloat(pnl.toFixed(2)), pnlPct: parseFloat(pnlPct.toFixed(2)), reason, win: pnl > 0 })
-    await saveState()
+    s.balanceUSDT += saleValue
+    s.totalPnL    += pnl
+    s.position     = null
+    const trade = await Trade.create({ userId, type: 'SELL', symbol, price: currentPrice, quantity, value: saleValue, pnl: parseFloat(pnl.toFixed(2)), pnlPct: parseFloat(pnlPct.toFixed(2)), reason, win: pnl > 0 })
+    await saveState(userId)
+    console.log(`[PaperTrading] SELL @ $${currentPrice.toFixed(2)} | PnL: $${pnl.toFixed(2)} [${userId}]`)
     return trade
   }
+
   return null
 }
 
-export async function checkStopAndTarget(currentPrice) {
-  if (!state.position) return null
-  const { stopLoss, takeProfit, symbol } = state.position
-  if (currentPrice <= stopLoss)   return executeOrder('SELL', symbol, currentPrice, 'Stop-loss atingido')
-  if (currentPrice >= takeProfit) return executeOrder('SELL', symbol, currentPrice, 'Take-profit atingido')
+export async function checkStopAndTarget(currentPrice, userId = 'default') {
+  const s = states[userId]
+  if (!s?.position) return null
+  const { stopLoss, takeProfit, symbol } = s.position
+  if (currentPrice <= stopLoss)   return executeOrder('SELL', symbol, currentPrice, 'Stop-loss atingido', userId)
+  if (currentPrice >= takeProfit) return executeOrder('SELL', symbol, currentPrice, 'Take-profit atingido', userId)
   return null
 }
 
-export function getUnrealizedPnL(currentPrice) {
-  if (!state.position) return 0
-  return (currentPrice - state.position.entryPrice) * state.position.quantity
+export function getUnrealizedPnL(currentPrice, userId = 'default') {
+  const s = states[userId]
+  if (!s?.position) return 0
+  return (currentPrice - s.position.entryPrice) * s.position.quantity
 }

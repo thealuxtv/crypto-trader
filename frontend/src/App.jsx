@@ -1,10 +1,14 @@
-import { useState } from 'react'
-import { useTrader } from './hooks/useTrader'
-import Backtest from './components/Backtest'
-import CandleChart from './components/CandleChart'
+import { useState, useEffect } from 'react'
+import { useTrader }    from './hooks/useTrader'
+import Backtest         from './components/Backtest'
+import CandleChart      from './components/CandleChart'
+import ChatBot          from './components/ChatBot'
+import Login            from './pages/Login'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts'
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
 
 const fmt  = (n, d = 2) => n != null ? Number(n).toFixed(d) : '—'
 const fmtK = (n)        => n != null ? `$${Number(n).toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'
@@ -71,9 +75,43 @@ function TradeRow({ trade }) {
   )
 }
 
+// ── Login wrapper ─────────────────────────────────────────────────────────
+
 export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem('token'))
+  const [user,  setUser]  = useState(() => {
+    try { return JSON.parse(localStorage.getItem('user')) } catch { return null }
+  })
+
+  const handleLogin = (userData, userToken) => {
+    setToken(userToken)
+    setUser(userData)
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+    setToken(null)
+    setUser(null)
+  }
+
+  useEffect(() => {
+    if (!token) return
+    fetch(`${API_URL}/auth/me`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (!d.ok) handleLogout() })
+      .catch(() => handleLogout())
+  }, [])
+
+  if (!token || !user) return <Login onLogin={handleLogin} />
+  return <Dashboard token={token} user={user} onLogout={handleLogout} />
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+
+function Dashboard({ token, user, onLogout }) {
   const [page, setPage] = useState('live')
-  const { status, trades, indicators, candles, connected, lastUpdate, resetWallet, loadStatus, loadCandles } = useTrader()
+  const { status, trades, indicators, candles, connected, lastUpdate, resetWallet, loadCandles, loadStatus } = useTrader(token)
 
   const wallet    = status?.wallet
   const lastCycle = status?.lastCycle
@@ -105,22 +143,17 @@ export default function App() {
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             {[{ id: 'live', label: '● Live' }, { id: 'backtest', label: '⏪ Backtest' }].map(p => (
-              <button
-                key={p.id}
-                onClick={() => setPage(p.id)}
-                style={{
-                  padding: '6px 16px', fontSize: 13, borderRadius: 8, cursor: 'pointer',
-                  background: page === p.id ? '#1a1a3a' : 'transparent',
-                  border: `1px solid ${page === p.id ? '#4444aa' : '#2a2a40'}`,
-                  color: page === p.id ? '#aaaaff' : '#555',
-                }}
-              >
-                {p.label}
-              </button>
+              <button key={p.id} onClick={() => setPage(p.id)} style={{
+                padding: '6px 16px', fontSize: 13, borderRadius: 8, cursor: 'pointer',
+                background: page === p.id ? '#1a1a3a' : 'transparent',
+                border: `1px solid ${page === p.id ? '#4444aa' : '#2a2a40'}`,
+                color: page === p.id ? '#aaaaff' : '#555',
+              }}>{p.label}</button>
             ))}
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 12, color: '#555' }}>👤 {user.name}</span>
           <span style={{
             fontSize: 11, padding: '4px 10px', borderRadius: 20,
             background: connected ? '#0d3d2a' : '#3d0d0d',
@@ -128,15 +161,17 @@ export default function App() {
           }}>
             {connected ? '● LIVE' : '○ OFFLINE'}
           </span>
-          <button
-            onClick={resetWallet}
-            style={{
-              fontSize: 12, padding: '6px 14px', borderRadius: 8,
-              background: 'transparent', border: '1px solid #333',
-              color: '#888', cursor: 'pointer',
-            }}
-          >
+          <button onClick={resetWallet} style={{
+            fontSize: 12, padding: '6px 14px', borderRadius: 8,
+            background: 'transparent', border: '1px solid #333', color: '#888', cursor: 'pointer',
+          }}>
             Reiniciar wallet
+          </button>
+          <button onClick={onLogout} style={{
+            fontSize: 12, padding: '6px 14px', borderRadius: 8,
+            background: 'transparent', border: '1px solid #3d0d0d', color: '#f05252', cursor: 'pointer',
+          }}>
+            Sair
           </button>
         </div>
       </div>
@@ -149,7 +184,7 @@ export default function App() {
           {[
             { label: 'Saldo USDT',       value: fmtK(wallet?.balanceUSDT),       sub: 'disponível' },
             { label: 'Preço atual',       value: fmtK(lastCycle?.price),          sub: 'BTC/USDT' },
-            { label: 'PnL realizado',     value: fmtK(wallet?.totalPnL),          sub: `${wallet?.totalTrades || 0} trades`, color: wallet?.totalPnL > 0 ? '#22c97b' : wallet?.totalPnL < 0 ? '#f05252' : '#888' },
+            { label: 'PnL realizado',     value: fmtK(wallet?.totalPnL),          sub: `${status?.wallet?.totalTrades || 0} trades`, color: wallet?.totalPnL > 0 ? '#22c97b' : wallet?.totalPnL < 0 ? '#f05252' : '#888' },
             { label: 'PnL não realizado', value: fmtK(lastCycle?.unrealizedPnL),  sub: 'posição aberta', color: lastCycle?.unrealizedPnL > 0 ? '#22c97b' : lastCycle?.unrealizedPnL < 0 ? '#f05252' : '#888' },
           ].map(m => (
             <div key={m.label} style={{ background: '#111120', border: '1px solid #1e1e2e', borderRadius: 12, padding: '14px 16px' }}>
@@ -165,12 +200,11 @@ export default function App() {
           {/* Coluna esquerda */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
-          {/* Gráfico de velas */}
-          <CandleChart candles={candles} indicators={ind} onTimeframeChange={(tf) => loadCandles('BTC/USDT', tf)} />
+            {/* Gráfico de velas */}
+            <CandleChart candles={candles} indicators={ind} onTimeframeChange={(tf) => loadCandles('BTC/USDT', tf)} />
 
-
-          {/* Sinal da IA */}
-          <div style={{ background: '#111120', border: '1px solid #1e1e2e', borderRadius: 12, padding: 18 }}>
+            {/* Sinal da IA */}
+            <div style={{ background: '#111120', border: '1px solid #1e1e2e', borderRadius: 12, padding: 18 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
                 <h2 style={{ margin: 0, fontSize: 13, color: '#555', textTransform: 'uppercase', letterSpacing: 1 }}>Sinal da IA</h2>
                 {lastCycle && <SignalBadge action={lastCycle.action} />}
@@ -252,7 +286,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Coluna direita — Indicadores */}
+          {/* Coluna direita */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div style={{ background: '#111120', border: '1px solid #1e1e2e', borderRadius: 12, padding: 18 }}>
               <h2 style={{ margin: '0 0 18px', fontSize: 13, color: '#555', textTransform: 'uppercase', letterSpacing: 1 }}>Indicadores técnicos</h2>
@@ -285,40 +319,42 @@ export default function App() {
               )}
             </div>
 
-          {/* Posição aberta */}
-          {wallet?.position && (
-            <div style={{ background: '#0d2a1a', border: '1px solid #0d4a2a', borderRadius: 12, padding: 18 }}>
-              <h2 style={{ margin: '0 0 14px', fontSize: 13, color: '#22c97b', textTransform: 'uppercase', letterSpacing: 1 }}>Posição aberta</h2>
-              {[
-                ['Par',         wallet.position.symbol],
-                ['Entrada',     fmtK(wallet.position.entryPrice)],
-                ['Quantidade',  fmt(wallet.position.quantity, 6)],
-                ['Stop-loss',   fmtK(wallet.position.stopLoss)],
-                ['Take-profit', fmtK(wallet.position.takeProfit)],
-              ].map(([k, v]) => (
-                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, color: '#0d8a4a' }}>{k}</span>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#22c97b' }}>{v}</span>
-                </div>
-              ))}
-              <button
-                onClick={async () => {
-                  await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3001/api'}/close-position`, {
-                    method: 'POST'
-                  })
-                  await loadStatus()
-                }}
-                style={{
-                  width: '100%', marginTop: 12, padding: '9px 0',
-                  background: '#3d0d0d', border: '1px solid #6a1a1a',
-                  color: '#f05252', borderRadius: 8, fontSize: 13,
-                  fontWeight: 600, cursor: 'pointer',
-                }}
-              >
-                ✕ Fechar posição
-              </button>
-            </div>
-          )}
+            {/* Posição aberta */}
+            {wallet?.position && (
+              <div style={{ background: '#0d2a1a', border: '1px solid #0d4a2a', borderRadius: 12, padding: 18 }}>
+                <h2 style={{ margin: '0 0 14px', fontSize: 13, color: '#22c97b', textTransform: 'uppercase', letterSpacing: 1 }}>Posição aberta</h2>
+                {[
+                  ['Par',         wallet.position.symbol],
+                  ['Entrada',     fmtK(wallet.position.entryPrice)],
+                  ['Quantidade',  fmt(wallet.position.quantity, 6)],
+                  ['Stop-loss',   fmtK(wallet.position.stopLoss)],
+                  ['Take-profit', fmtK(wallet.position.takeProfit)],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                    <span style={{ fontSize: 12, color: '#0d8a4a' }}>{k}</span>
+                    <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#22c97b' }}>{v}</span>
+                  </div>
+                ))}
+                <button
+                  onClick={async () => {
+                    await fetch(`${API_URL}/close-position`, {
+                      method: 'POST',
+                      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+                    })
+                    await loadStatus()
+                  }}
+                  style={{
+                    width: '100%', marginTop: 12, padding: '9px 0',
+                    background: '#3d0d0d', border: '1px solid #6a1a1a',
+                    color: '#f05252', borderRadius: 8, fontSize: 13,
+                    fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  ✕ Fechar posição
+                </button>
+              </div>
+            )}
+
             {lastUpdate && (
               <p style={{ fontSize: 11, color: '#333', textAlign: 'center', margin: 0 }}>
                 Atualizado às {lastUpdate.toLocaleTimeString('pt-PT')}
@@ -326,7 +362,6 @@ export default function App() {
             )}
           </div>
         </div>
-
       </>}
 
       {/* ── Página Backtest ── */}
@@ -335,6 +370,8 @@ export default function App() {
           <Backtest />
         </div>
       )}
+
+      <ChatBot />
     </div>
   )
 }

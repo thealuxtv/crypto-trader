@@ -1,4 +1,6 @@
 import mongoose from 'mongoose'
+import bcrypt   from 'bcryptjs'
+
 
 const tradeSchema = new mongoose.Schema({
   type:       { type: String, enum: ['BUY', 'SELL'], required: true },
@@ -28,5 +30,26 @@ const walletSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 })
 
+// ── User ──────────────────────────────────────────────────────────────────
+const userSchema = new mongoose.Schema({
+  email:     { type: String, required: true, unique: true, lowercase: true, trim: true },
+  password:  { type: String, required: true, minlength: 6 },
+  name:      { type: String, required: true, trim: true },
+  createdAt: { type: Date, default: Date.now },
+})
+
+// Hash da password antes de guardar
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next()
+  this.password = await bcrypt.hash(this.password, 12)
+  next()
+})
+
+// Método para verificar password
+userSchema.methods.checkPassword = async function(candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password)
+}
+
 export const Trade  = mongoose.model('Trade',  tradeSchema)
 export const Wallet = mongoose.model('Wallet', walletSchema)
+export const User   = mongoose.model('User',   userSchema)
