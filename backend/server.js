@@ -15,11 +15,8 @@ const wss    = new WebSocketServer({ server })
 const PORT   = process.env.PORT || 3001
 
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    /\.vercel\.app$/,
-  ],
-  credentials: true,
+  origin: '*',
+  credentials: false,
 }))
 app.use(express.json())
 app.use('/api', routes)
