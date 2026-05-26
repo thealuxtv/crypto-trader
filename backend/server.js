@@ -14,7 +14,13 @@ const server = createServer(app)
 const wss    = new WebSocketServer({ server })
 const PORT   = process.env.PORT || 3001
 
-app.use(cors())
+app.use(cors({
+  origin: [
+    'http://localhost:5173',
+    /\.vercel\.app$/,
+  ],
+  credentials: true,
+}))
 app.use(express.json())
 app.use('/api', routes)
 app.get('/', (req, res) => res.json({ name: 'Crypto AI Trader API', version: '1.0.0' }))
