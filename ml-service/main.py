@@ -28,8 +28,9 @@ model      = None
 scaler     = None
 model_info = {}
 
-MODEL_PATH  = "/workspaces/crypto-trader/ml-service/model.pkl"
-SCALER_PATH = "/workspaces/crypto-trader/ml-service/scaler.pkl"
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH  = os.path.join(BASE_DIR, "model.pkl")
+SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
 
 FEATURES = [
     "rsi", "rsi_7", "rsi_21",
