@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import ccxt
 from collections import Counter
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,15 +16,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import StandardScaler
 
-app = FastAPI(title="Crypto ML Service")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# ── Estado global ──────────────────────────────────────────────────────────
 model      = None
 scaler     = None
 model_info = {}
@@ -194,12 +187,7 @@ def compute_metrics(trades, starting_balance, final_balance, equity_curve):
         "sharpeRatio":  round(sharpe, 2),
     }
 
-@app.get("/")
-def root():
-    return {"status": "online", "model_trained": model is not None, "info": model_info}
-
-@app.post("/train")
-async def train(symbol: str = "BTC/USDT", timeframe: str = "1h", limit: int = 5000):
+async def run_train(symbol="BTC/USDT", timeframe="1h", limit=5000):
     global model, scaler, model_info
 
     print(f"[ML] A descarregar {limit} velas de {symbol} ({timeframe})...")
@@ -228,34 +216,25 @@ async def train(symbol: str = "BTC/USDT", timeframe: str = "1h", limit: int = 50
 
     print("[ML] A treinar XGBoost...")
     model = xgb.XGBClassifier(
-        n_estimators=500,
-        max_depth=4,
-        learning_rate=0.02,
-        subsample=0.7,
-        colsample_bytree=0.7,
-        min_child_weight=5,
-        gamma=0.2,
-        reg_alpha=0.1,
-        reg_lambda=1.5,
-        eval_metric="mlogloss",
-        random_state=42,
+        n_estimators=500, max_depth=4, learning_rate=0.02,
+        subsample=0.7, colsample_bytree=0.7, min_child_weight=5,
+        gamma=0.2, reg_alpha=0.1, reg_lambda=1.5,
+        eval_metric="mlogloss", random_state=42,
     )
-    model.fit(
-        X_train, y_train,
-        sample_weight=sample_weights,
-        eval_set=[(X_test, y_test)],
-        verbose=False,
-    )
+    model.fit(X_train, y_train, sample_weight=sample_weights,
+              eval_set=[(X_test, y_test)], verbose=False)
 
     y_pred   = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     report   = classification_report(y_test, y_pred, target_names=["HOLD","BUY","SELL"], output_dict=True)
 
     print(f"[ML] Accuracy: {accuracy:.2%}")
-    print(classification_report(y_test, y_pred, target_names=["HOLD","BUY","SELL"]))
 
-    with open(MODEL_PATH,  "wb") as f: pickle.dump(model,  f)
-    with open(SCALER_PATH, "wb") as f: pickle.dump(scaler, f)
+    try:
+        with open(MODEL_PATH,  "wb") as f: pickle.dump(model,  f)
+        with open(SCALER_PATH, "wb") as f: pickle.dump(scaler, f)
+    except Exception as e:
+        print(f"[ML] Aviso: não foi possível guardar o modelo em disco: {e}")
 
     model_info = {
         "symbol":         symbol,
@@ -267,8 +246,48 @@ async def train(symbol: str = "BTC/USDT", timeframe: str = "1h", limit: int = 50
         "hold_precision": round(report.get("HOLD", {}).get("precision", 0), 3),
         "trained_at":     pd.Timestamp.now().isoformat(),
     }
+    return model_info
 
-    return {"ok": True, "metrics": model_info}
+# ── Lifespan — treina automaticamente ao arrancar ─────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model, scaler
+    print("[ML] A arrancar o serviço...")
+    try:
+        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
+            with open(MODEL_PATH,  "rb") as f: model  = pickle.load(f)
+            with open(SCALER_PATH, "rb") as f: scaler = pickle.load(f)
+            print("[ML] Modelo carregado do disco")
+        else:
+            print("[ML] Modelo não encontrado — a treinar automaticamente...")
+            await run_train()
+            print("[ML] Modelo treinado com sucesso!")
+    except Exception as e:
+        print(f"[ML] Erro ao arrancar: {e} — a treinar de raiz...")
+        try:
+            await run_train()
+        except Exception as e2:
+            print(f"[ML] Erro crítico no treino: {e2}")
+    yield
+    print("[ML] Serviço a terminar...")
+
+app = FastAPI(title="Crypto ML Service", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def root():
+    return {"status": "online", "model_trained": model is not None, "info": model_info}
+
+@app.post("/train")
+async def train(symbol: str = "BTC/USDT", timeframe: str = "1h", limit: int = 5000):
+    metrics = await run_train(symbol, timeframe, limit)
+    return {"ok": True, "metrics": metrics}
 
 
 class BacktestRequest(BaseModel):
@@ -287,6 +306,9 @@ class BacktestRequest(BaseModel):
 async def backtest_ml(req: BacktestRequest):
     global model, scaler
 
+    if model is None:
+        return {"ok": False, "error": "Modelo não treinado — a aguardar treino automático"}
+
     symbol           = req.symbol
     timeframe        = req.timeframe
     limit            = req.limit
@@ -297,19 +319,12 @@ async def backtest_ml(req: BacktestRequest):
     fees_pct         = req.fees_pct
     warmup           = req.warmup
 
-    if model is None:
-        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
-            with open(MODEL_PATH,  "rb") as f: model  = pickle.load(f)
-            with open(SCALER_PATH, "rb") as f: scaler = pickle.load(f)
-        else:
-            return {"ok": False, "error": "Modelo não treinado — chama /train primeiro"}
-
     print(f"[Backtest ML] A descarregar {limit} velas RECENTES de {symbol} ({timeframe})...")
     df = download_candles(symbol, timeframe, limit, start_date='2025-01-01T00:00:00Z')
     df = compute_features(df)
     df = df.dropna().reset_index(drop=True)
 
-    print(f"[Backtest ML] A simular {len(df) - warmup} velas de {symbol} ({timeframe}) com dados de 2025...")
+    print(f"[Backtest ML] A simular {len(df) - warmup} velas...")
 
     balance      = starting_balance
     position     = None
@@ -326,16 +341,11 @@ async def backtest_ml(req: BacktestRequest):
                 pnl = (exit_price - position["entry_price"]) * position["quantity"] * (1 - fees_pct)
                 balance += position["quantity"] * exit_price * (1 - fees_pct)
                 trades.append({
-                    "type":        "SELL",
-                    "entry_price": position["entry_price"],
-                    "exit_price":  exit_price,
-                    "quantity":    position["quantity"],
-                    "pnl":         round(pnl, 2),
-                    "pnl_pct":     round((exit_price / position["entry_price"] - 1) * 100, 3),
-                    "reason":      "stop-loss",
-                    "win":         bool(pnl > 0),
-                    "entry_time":  str(position["entry_time"]),
-                    "exit_time":   str(row["timestamp"]),
+                    "type": "SELL", "entry_price": position["entry_price"],
+                    "exit_price": exit_price, "quantity": position["quantity"],
+                    "pnl": round(pnl, 2), "pnl_pct": round((exit_price / position["entry_price"] - 1) * 100, 3),
+                    "reason": "stop-loss", "win": bool(pnl > 0),
+                    "entry_time": str(position["entry_time"]), "exit_time": str(row["timestamp"]),
                 })
                 position = None
 
@@ -344,16 +354,11 @@ async def backtest_ml(req: BacktestRequest):
                 pnl = (exit_price - position["entry_price"]) * position["quantity"] * (1 - fees_pct)
                 balance += position["quantity"] * exit_price * (1 - fees_pct)
                 trades.append({
-                    "type":        "SELL",
-                    "entry_price": position["entry_price"],
-                    "exit_price":  exit_price,
-                    "quantity":    position["quantity"],
-                    "pnl":         round(pnl, 2),
-                    "pnl_pct":     round((exit_price / position["entry_price"] - 1) * 100, 3),
-                    "reason":      "take-profit",
-                    "win":         bool(pnl > 0),
-                    "entry_time":  str(position["entry_time"]),
-                    "exit_time":   str(row["timestamp"]),
+                    "type": "SELL", "entry_price": position["entry_price"],
+                    "exit_price": exit_price, "quantity": position["quantity"],
+                    "pnl": round(pnl, 2), "pnl_pct": round((exit_price / position["entry_price"] - 1) * 100, 3),
+                    "reason": "take-profit", "win": bool(pnl > 0),
+                    "entry_time": str(position["entry_time"]), "exit_time": str(row["timestamp"]),
                 })
                 position = None
 
@@ -368,9 +373,8 @@ async def backtest_ml(req: BacktestRequest):
             spend    = balance * max_position_pct
             quantity = (spend - spend * fees_pct) / price
             position = {
-                "quantity":    quantity,
-                "entry_price": price,
-                "entry_time":  str(row["timestamp"]),
+                "quantity": quantity, "entry_price": price,
+                "entry_time": str(row["timestamp"]),
                 "stop_loss":   price * (1 - stop_loss_pct),
                 "take_profit": price * (1 + take_profit_pct),
             }
@@ -380,16 +384,11 @@ async def backtest_ml(req: BacktestRequest):
             pnl = (price - position["entry_price"]) * position["quantity"] * (1 - fees_pct)
             balance += position["quantity"] * price * (1 - fees_pct)
             trades.append({
-                "type":        "SELL",
-                "entry_price": position["entry_price"],
-                "exit_price":  price,
-                "quantity":    position["quantity"],
-                "pnl":         round(pnl, 2),
-                "pnl_pct":     round((price / position["entry_price"] - 1) * 100, 3),
-                "reason":      "sinal-venda",
-                "win":         bool(pnl > 0),
-                "entry_time":  position["entry_time"],
-                "exit_time":   str(row["timestamp"]),
+                "type": "SELL", "entry_price": position["entry_price"],
+                "exit_price": price, "quantity": position["quantity"],
+                "pnl": round(pnl, 2), "pnl_pct": round((price / position["entry_price"] - 1) * 100, 3),
+                "reason": "sinal-venda", "win": bool(pnl > 0),
+                "entry_time": position["entry_time"], "exit_time": str(row["timestamp"]),
             })
             position = None
 
@@ -405,200 +404,22 @@ async def backtest_ml(req: BacktestRequest):
         pnl = (last_price - position["entry_price"]) * position["quantity"] * (1 - fees_pct)
         balance += position["quantity"] * last_price * (1 - fees_pct)
         trades.append({
-            "type":        "SELL",
-            "entry_price": position["entry_price"],
-            "exit_price":  last_price,
-            "quantity":    position["quantity"],
-            "pnl":         round(pnl, 2),
-            "pnl_pct":     round((last_price / position["entry_price"] - 1) * 100, 3),
-            "reason":      "fim-backtest",
-            "win":         bool(pnl > 0),
-            "entry_time":  position["entry_time"],
-            "exit_time":   str(df.iloc[-1]["timestamp"]),
+            "type": "SELL", "entry_price": position["entry_price"],
+            "exit_price": last_price, "quantity": position["quantity"],
+            "pnl": round(pnl, 2), "pnl_pct": round((last_price / position["entry_price"] - 1) * 100, 3),
+            "reason": "fim-backtest", "win": bool(pnl > 0),
+            "entry_time": position["entry_time"], "exit_time": str(df.iloc[-1]["timestamp"]),
         })
 
     metrics = compute_metrics(trades, starting_balance, balance, equity_curve)
     print(f"[Backtest ML] Concluído — {len(trades)} trades | retorno: {metrics.get('totalReturn', 0)}%")
 
     return to_python({
-        "ok":           True,
-        "symbol":       symbol,
-        "timeframe":    timeframe,
-        "candles_used": len(df) - warmup,
-        "trades":       trades,
-        "equity_curve": equity_curve,
-        "metrics":      metrics,
+        "ok": True, "symbol": symbol, "timeframe": timeframe,
+        "candles_used": len(df) - warmup, "trades": trades,
+        "equity_curve": equity_curve, "metrics": metrics,
     })
 
-# ── Chatbot ───────────────────────────────────────────────────────────────
-
-KNOWLEDGE_BASE = {
-    "rsi": """O RSI (Relative Strength Index) é um indicador de momentum que mede a velocidade e magnitude das variações de preço numa escala de 0 a 100.
-- RSI abaixo de 30: mercado sobrevendido — possível sinal de compra
-- RSI acima de 70: mercado sobrecomprado — possível sinal de venda
-- RSI entre 30 e 70: zona neutra
-O sistema usa RSI de 3 períodos diferentes: 7, 14 e 21.""",
-
-    "macd": """O MACD (Moving Average Convergence Divergence) é um indicador de tendência que mostra a relação entre duas médias móveis exponenciais (EMA 12 e EMA 26).
-- Quando o MACD cruza acima da linha de sinal: sinal de compra (bullish)
-- Quando o MACD cruza abaixo da linha de sinal: sinal de venda (bearish)
-- O histograma mostra a diferença entre o MACD e a linha de sinal""",
-
-    "bollinger": """As Bollinger Bands são bandas de volatilidade calculadas com base numa média móvel e desvio padrão.
-- Banda superior: média + 2 desvios padrão
-- Banda inferior: média - 2 desvios padrão
-- Preço próximo da banda inferior: possível reversão para cima
-- Preço próximo da banda superior: possível reversão para baixo
-- Bandas largas: alta volatilidade; bandas estreitas: baixa volatilidade""",
-
-    "ema": """As EMA (Exponential Moving Averages) são médias móveis que dão mais peso aos preços recentes.
-- EMA 50: tendência de médio prazo
-- EMA 200: tendência de longo prazo
-- EMA 50 acima de EMA 200: tendência bullish (mercado em alta)
-- EMA 50 abaixo de EMA 200: tendência bearish (mercado em queda)
-Este cruzamento chama-se Golden Cross (bullish) ou Death Cross (bearish)""",
-
-    "xgboost": """O XGBoost é o modelo de machine learning que toma as decisões de trading.
-Foi treinado com dados históricos do BTC/USDT de 2023-2024 usando 24 features técnicas.
-Devolve 3 probabilidades: P(HOLD), P(BUY), P(SELL).
-A decisão final é a classe com maior probabilidade.
-Precision atual: ~45% para BUY e ~40% para SELL.""",
-
-    "backtest": """O backtest simula a estratégia em dados históricos para avaliar a performance antes de usar dinheiro real.
-Métricas principais:
-- Retorno total: ganho ou perda percentual no período
-- Taxa de acerto: % de trades vencedores
-- Profit factor: rácio entre ganhos totais e perdas totais (>1 é lucrativo)
-- Max drawdown: maior queda do capital do pico ao fundo
-- Sharpe ratio: retorno ajustado ao risco (>1 é bom, >2 é excelente)""",
-
-    "paper_trading": """Paper trading é simulação com dinheiro fictício usando preços reais da exchange.
-Permite testar a estratégia sem arriscar capital real.
-O sistema começa com $10.000 simulados e executa ordens reais na Binance mas sem enviar fundos.""",
-
-    "stop_loss": """O stop-loss é uma ordem automática que fecha a posição quando o preço cai abaixo de um nível definido.
-Protege o capital de perdas excessivas.
-Exemplo: stop-loss de 3% significa que se comprar a $100, a posição fecha automaticamente a $97.""",
-
-    "take_profit": """O take-profit é uma ordem automática que fecha a posição quando o preço sobe acima de um nível definido.
-Garante os lucros antes que o mercado reverta.
-Exemplo: take-profit de 6% significa que se comprar a $100, a posição fecha automaticamente a $106.""",
-
-    "volume": """O volume indica quantas unidades foram negociadas num período.
-O sistema calcula o volume relativo: volume atual vs média das últimas 20 velas.
-- Volume alto (>1.5x): confirma o sinal e aumenta a confiança
-- Volume baixo (<0.7x): enfraquece o sinal""",
-
-    "pnl": """PnL significa Profit and Loss (Lucro e Perda).
-- PnL realizado: lucro/perda de trades já fechados
-- PnL não realizado: lucro/perda da posição atualmente aberta
-- PnL total: soma de todos os trades fechados""",
-
-    "momentum": """O momentum mede a velocidade de variação do preço num período.
-- Momentum positivo: preço a subir mais rápido que no passado
-- Momentum negativo: preço a cair
-O sistema calcula momentum a 3, 6 e 12 períodos.""",
-
-    "volatilidade": """A volatilidade mede a magnitude das variações de preço.
-Alta volatilidade = preço a oscilar muito = mais risco e oportunidade.
-O sistema calcula volatilidade a 6 e 12 períodos usando o desvio padrão dos retornos.""",
-}
-
-def find_answer(question: str, context: dict = None) -> str:
-    q = question.lower()
-
-    # Perguntas sobre indicadores
-    if any(w in q for w in ["rsi", "relative strength"]):
-        return KNOWLEDGE_BASE["rsi"]
-    if any(w in q for w in ["macd", "moving average convergence"]):
-        return KNOWLEDGE_BASE["macd"]
-    if any(w in q for w in ["bollinger", "bandas", "banda"]):
-        return KNOWLEDGE_BASE["bollinger"]
-    if any(w in q for w in ["ema", "média móvel", "media movel", "golden cross", "death cross"]):
-        return KNOWLEDGE_BASE["ema"]
-    if any(w in q for w in ["xgboost", "modelo", "machine learning", "ml", "ia", "inteligência artificial"]):
-        return KNOWLEDGE_BASE["xgboost"]
-    if any(w in q for w in ["backtest", "backtesting", "histórico", "historico"]):
-        return KNOWLEDGE_BASE["backtest"]
-    if any(w in q for w in ["paper trading", "simulação", "simulacao", "fictício", "ficticio"]):
-        return KNOWLEDGE_BASE["paper_trading"]
-    if any(w in q for w in ["stop loss", "stop-loss", "stoploss"]):
-        return KNOWLEDGE_BASE["stop_loss"]
-    if any(w in q for w in ["take profit", "take-profit", "takeprofit"]):
-        return KNOWLEDGE_BASE["take_profit"]
-    if any(w in q for w in ["volume"]):
-        return KNOWLEDGE_BASE["volume"]
-    if any(w in q for w in ["pnl", "lucro", "perda", "profit", "loss"]):
-        return KNOWLEDGE_BASE["pnl"]
-    if any(w in q for w in ["momentum"]):
-        return KNOWLEDGE_BASE["momentum"]
-    if any(w in q for w in ["volatilidade", "volatilidade", "volatility"]):
-        return KNOWLEDGE_BASE["volatilidade"]
-
-    # Perguntas sobre o estado atual
-    if context:
-        if any(w in q for w in ["saldo", "balance", "dinheiro", "capital"]):
-            return f"O teu saldo atual é de ${context.get('balance', 0):.2f} USDT."
-
-        if any(w in q for w in ["posição", "posicao", "position", "aberta"]):
-            pos = context.get("position")
-            if pos:
-                return (f"Tens uma posição aberta em {pos.get('symbol')}.\n"
-                        f"Entrada: ${pos.get('entryPrice', 0):.2f}\n"
-                        f"Stop-loss: ${pos.get('stopLoss', 0):.2f}\n"
-                        f"Take-profit: ${pos.get('takeProfit', 0):.2f}")
-            return "Não tens nenhuma posição aberta no momento."
-
-        if any(w in q for w in ["preço", "preco", "price", "btc", "bitcoin"]):
-            return f"O preço atual do BTC/USDT é ${context.get('price', 0):.2f}."
-
-        if any(w in q for w in ["sinal", "signal", "comprar", "vender", "decisão", "decisao"]):
-            action    = context.get("action", "HOLD")
-            conf      = context.get("confidence", 0) * 100
-            action_pt = {"BUY": "COMPRAR", "SELL": "VENDER", "HOLD": "AGUARDAR"}.get(action, action)
-            return f"O sinal atual da IA é {action_pt} com {conf:.0f}% de confiança."
-
-        if any(w in q for w in ["trades", "histórico", "historico", "operações", "operacoes"]):
-            total = context.get("totalTrades", 0)
-            pnl   = context.get("totalPnL", 0)
-            return f"Realizaste {total} trades com um PnL total de ${pnl:.2f}."
-
-    # Lista de tópicos disponíveis
-    if any(w in q for w in ["ajuda", "help", "o que sabes", "tópicos", "topicos", "perguntas"]):
-        return """Posso responder a perguntas sobre:
-
-📊 **Indicadores técnicos**: RSI, MACD, Bollinger Bands, EMA, Volume, Momentum, Volatilidade
-🤖 **Modelo ML**: XGBoost, como funciona, precisão
-📈 **Trading**: Backtest, Paper trading, Stop-loss, Take-profit, PnL
-💰 **Estado atual**: Saldo, posição aberta, preço atual, sinal da IA, histórico de trades
-
-Exemplos de perguntas:
-- "O que é o RSI?"
-- "Como funciona o MACD?"
-- "Qual é o meu saldo atual?"
-- "Tenho alguma posição aberta?"
-- "Qual é o sinal atual?"
-"""
-
-    return """Não encontrei uma resposta específica para essa pergunta. 
-
-Tenta perguntar sobre:
-- Indicadores: RSI, MACD, Bollinger Bands, EMA, Volume
-- Sistema: XGBoost, backtest, paper trading
-- Estado: saldo, posição, sinal atual, trades
-
-Escreve **ajuda** para ver todos os tópicos disponíveis."""
-
-
-class ChatRequest(BaseModel):
-    message: str
-    context: dict = {}
-
-
-@app.post("/chat")
-def chat(req: ChatRequest):
-    answer = find_answer(req.message, req.context)
-    return {"answer": answer, "ok": True}
 
 class PredictRequest(BaseModel):
     rsi:              float
@@ -632,18 +453,11 @@ def predict(req: PredictRequest):
     global model, scaler
 
     if model is None:
-        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
-            with open(MODEL_PATH,  "rb") as f: model  = pickle.load(f)
-            with open(SCALER_PATH, "rb") as f: scaler = pickle.load(f)
-            print("[ML] Modelo carregado do disco")
-        else:
-            return {
-                "action":     "HOLD",
-                "confidence": 0,
-                "score":      0,
-                "reasons":    ["Modelo não treinado — chama /train primeiro"],
-                "source":     "fallback",
-            }
+        return {
+            "action": "HOLD", "confidence": 0, "score": 0,
+            "reasons": ["Modelo a ser treinado — aguarda 2-3 minutos"],
+            "source": "fallback",
+        }
 
     features = np.array([[
         req.rsi, req.rsi_7, req.rsi_21,
@@ -673,10 +487,8 @@ def predict(req: PredictRequest):
     ]
 
     return {
-        "action":     action,
-        "confidence": round(confidence, 4),
-        "score":      round(score, 4),
-        "reasons":    reasons,
+        "action": action, "confidence": round(confidence, 4),
+        "score": round(score, 4), "reasons": reasons,
         "proba": {
             "hold": round(float(proba[0]), 4),
             "buy":  round(float(proba[1]), 4),
@@ -684,3 +496,124 @@ def predict(req: PredictRequest):
         },
         "source": "xgboost",
     }
+
+
+KNOWLEDGE_BASE = {
+    "rsi": """O RSI (Relative Strength Index) é um indicador de momentum que mede a velocidade e magnitude das variações de preço numa escala de 0 a 100.
+- RSI abaixo de 30: mercado sobrevendido — possível sinal de compra
+- RSI acima de 70: mercado sobrecomprado — possível sinal de venda
+- RSI entre 30 e 70: zona neutra
+O sistema usa RSI de 3 períodos diferentes: 7, 14 e 21.""",
+    "macd": """O MACD (Moving Average Convergence Divergence) é um indicador de tendência que mostra a relação entre duas médias móveis exponenciais (EMA 12 e EMA 26).
+- Quando o MACD cruza acima da linha de sinal: sinal de compra (bullish)
+- Quando o MACD cruza abaixo da linha de sinal: sinal de venda (bearish)
+- O histograma mostra a diferença entre o MACD e a linha de sinal""",
+    "bollinger": """As Bollinger Bands são bandas de volatilidade calculadas com base numa média móvel e desvio padrão.
+- Banda superior: média + 2 desvios padrão
+- Banda inferior: média - 2 desvios padrão
+- Preço próximo da banda inferior: possível reversão para cima
+- Preço próximo da banda superior: possível reversão para baixo""",
+    "ema": """As EMA (Exponential Moving Averages) são médias móveis que dão mais peso aos preços recentes.
+- EMA 50: tendência de médio prazo
+- EMA 200: tendência de longo prazo
+- EMA 50 acima de EMA 200: tendência bullish (Golden Cross)
+- EMA 50 abaixo de EMA 200: tendência bearish (Death Cross)""",
+    "xgboost": """O XGBoost é o modelo de machine learning que toma as decisões de trading.
+Foi treinado com dados históricos do BTC/USDT de 2023-2024 usando 24 features técnicas.
+Devolve 3 probabilidades: P(HOLD), P(BUY), P(SELL).
+A decisão final é a classe com maior probabilidade.""",
+    "backtest": """O backtest simula a estratégia em dados históricos para avaliar a performance.
+Métricas principais:
+- Retorno total: ganho ou perda percentual no período
+- Taxa de acerto: % de trades vencedores
+- Profit factor: rácio entre ganhos totais e perdas totais (>1 é lucrativo)
+- Max drawdown: maior queda do capital do pico ao fundo
+- Sharpe ratio: retorno ajustado ao risco (>1 é bom)""",
+    "paper_trading": """Paper trading é simulação com dinheiro fictício usando preços reais da exchange.
+Permite testar a estratégia sem arriscar capital real.
+O sistema começa com $10.000 simulados.""",
+    "stop_loss": """O stop-loss é uma ordem automática que fecha a posição quando o preço cai abaixo de um nível definido.
+Protege o capital de perdas excessivas.
+Exemplo: stop-loss de 3% significa que se comprar a $100, fecha automaticamente a $97.""",
+    "take_profit": """O take-profit é uma ordem automática que fecha a posição quando o preço sobe acima de um nível definido.
+Garante os lucros antes que o mercado reverta.
+Exemplo: take-profit de 6% significa que se comprar a $100, fecha automaticamente a $106.""",
+    "volume": """O volume indica quantas unidades foram negociadas num período.
+- Volume alto (>1.5x): confirma o sinal e aumenta a confiança
+- Volume baixo (<0.7x): enfraquece o sinal""",
+    "pnl": """PnL significa Profit and Loss (Lucro e Perda).
+- PnL realizado: lucro/perda de trades já fechados
+- PnL não realizado: lucro/perda da posição atualmente aberta""",
+}
+
+def find_answer(question: str, context: dict = None) -> str:
+    q = question.lower()
+
+    if any(w in q for w in ["rsi", "relative strength"]):
+        return KNOWLEDGE_BASE["rsi"]
+    if any(w in q for w in ["macd", "moving average convergence"]):
+        return KNOWLEDGE_BASE["macd"]
+    if any(w in q for w in ["bollinger", "bandas", "banda"]):
+        return KNOWLEDGE_BASE["bollinger"]
+    if any(w in q for w in ["ema", "média móvel", "golden cross", "death cross"]):
+        return KNOWLEDGE_BASE["ema"]
+    if any(w in q for w in ["xgboost", "modelo", "machine learning", "ml", "ia"]):
+        return KNOWLEDGE_BASE["xgboost"]
+    if any(w in q for w in ["backtest", "histórico"]):
+        return KNOWLEDGE_BASE["backtest"]
+    if any(w in q for w in ["paper trading", "simulação"]):
+        return KNOWLEDGE_BASE["paper_trading"]
+    if any(w in q for w in ["stop loss", "stop-loss"]):
+        return KNOWLEDGE_BASE["stop_loss"]
+    if any(w in q for w in ["take profit", "take-profit"]):
+        return KNOWLEDGE_BASE["take_profit"]
+    if any(w in q for w in ["volume"]):
+        return KNOWLEDGE_BASE["volume"]
+    if any(w in q for w in ["pnl", "lucro", "perda"]):
+        return KNOWLEDGE_BASE["pnl"]
+
+    if context:
+        if any(w in q for w in ["saldo", "balance", "dinheiro"]):
+            return f"O teu saldo atual é de ${context.get('balance', 0):.2f} USDT."
+        if any(w in q for w in ["posição", "posicao", "aberta"]):
+            pos = context.get("position")
+            if pos:
+                return (f"Tens uma posição aberta em {pos.get('symbol')}.\n"
+                        f"Entrada: ${pos.get('entryPrice', 0):.2f}\n"
+                        f"Stop-loss: ${pos.get('stopLoss', 0):.2f}\n"
+                        f"Take-profit: ${pos.get('takeProfit', 0):.2f}")
+            return "Não tens nenhuma posição aberta no momento."
+        if any(w in q for w in ["preço", "preco", "btc", "bitcoin"]):
+            return f"O preço atual do BTC/USDT é ${context.get('price', 0):.2f}."
+        if any(w in q for w in ["sinal", "comprar", "vender", "decisão"]):
+            action    = context.get("action", "HOLD")
+            conf      = context.get("confidence", 0) * 100
+            action_pt = {"BUY": "COMPRAR", "SELL": "VENDER", "HOLD": "AGUARDAR"}.get(action, action)
+            return f"O sinal atual da IA é {action_pt} com {conf:.0f}% de confiança."
+
+    if any(w in q for w in ["ajuda", "help", "tópicos", "perguntas"]):
+        return """Posso responder a perguntas sobre:
+
+📊 Indicadores: RSI, MACD, Bollinger Bands, EMA, Volume
+🤖 Modelo ML: XGBoost, como funciona
+📈 Trading: Backtest, Paper trading, Stop-loss, Take-profit, PnL
+💰 Estado atual: Saldo, posição aberta, preço atual, sinal da IA
+
+Exemplos:
+- "O que é o RSI?"
+- "Como funciona o MACD?"
+- "Qual é o meu saldo atual?"
+- "Tenho alguma posição aberta?" """
+
+    return "Não encontrei uma resposta específica. Escreve 'ajuda' para ver os tópicos disponíveis."
+
+
+class ChatRequest(BaseModel):
+    message: str
+    context: dict = {}
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    answer = find_answer(req.message, req.context)
+    return {"answer": answer, "ok": True}
